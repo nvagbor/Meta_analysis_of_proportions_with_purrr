@@ -1,0 +1,414 @@
+---
+title: "Meta-analysis of proportions"
+author: "Valirie N. Agbor"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Remove objects in the working directory --
+rm(list = ls())
+
+# Load packages--
+pacman::p_load(
+  tidyverse, 
+  stringr, 
+  readxl,
+  janitor,
+  meta, metafor
+)
+
+knitr::opts_knit$set(root.dir = "./temp")
+```
+
+
+# Load data --
+
+```{r Read data}
+
+# Get datasets in directory--
+list_files <- list.files(getwd(), pattern = ".xlsx", recursive = TRUE)
+
+# Get file names to use as forest plot labels --
+name_file <- list_files %>% 
+                str_replace(pattern = ".xlsx", "") %>% 
+                str_replace(pattern = "Datasets/", "")
+
+
+# Create list of datasets -- 
+
+## Loop through file names with purrr
+## Read datasets and hold the in a list
+## Use purrr to loop through datasets and do some cleaning 
+
+dat_list <- 
+  
+  purrr::map2(
+   .x = list_files,     
+   .y = seq_along(name_file), 
+      ~ readxl::read_excel(path = paste0("./", .x)) %>% 
+        janitor::clean_names()  %>% 
+            mutate(
+               study       = paste(author, year, sep = ", "),  
+               unsd_region = str_to_title(unsd_region),
+               year_group  = factor(case_when(year <= 2010 ~ "2010 or earlier", TRUE ~ "After 2010")),
+               name        = name_file[.y]
+               )
+   )
+   
+```
+
+
+# Run meta-analysis --
+
+Fit a random-effect meta-analysis using a DL estimator. 
+Stabilise the variance of study-specific estimates using the Freeman-Tukey double-arcsine transformation 
+
+
+## Diagnostics with metafor --
+
+```{r Metafor - Summary prop}
+
+# Transform proportions
+
+ies <- purrr::map(.x = dat_list, 
+           ~metafor::escalc(xi      = cases,
+                   ni      = sample_size,
+                   measure = "PFT", 
+                   data    = .x, 
+                   add     = 0))
+
+
+pes.da <- purrr::map(.x = ies, 
+              ~metafor::rma(
+                   yi, 
+                   vi, 
+                   data     = .x, 
+                   method   = "DL", 
+                   weighted = TRUE, 
+                   slab     = study))
+
+
+pes <- purrr::map2(.x = pes.da, .y = dat_list,
+                  ~metafor::predict(
+                    .x,
+                    transf = transf.ipft.hm,
+                    targ   = list(ni = .y$sample_size))
+           )   
+
+
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+### Identify outliers -- 
+
+```{r Baujat plot}
+
+baujat_list <- purrr::map(.x = pes.da, ~baujat(.x, symbol = "slab")) 
+
+```
+
+```{r Influential studies}
+
+inf <- purrr::map(.x = pes.da, ~influence(.x))
+
+purrr::map(.x = inf, ~plot(.x))
+
+```
+
+```{r leave-1-out}
+
+l1o <- purrr::map(.x = pes.da, ~metafor::leave1out(.x))
+
+yi <- purrr::map(.x = l1o, ~.x$estimate)
+vi <- purrr::map(.x = l1o, ~.x$se^2)
+
+purrr::map2(
+     .x = yi, 
+     .y = seq_along(yi), 
+      ~metafor::forest(
+             .x,
+             vi[[.y]],
+             transf = transf.ipft.hm,
+             targ   = list(ni = dat_list[[.y]]$sample_size),
+             slab   = dat_list[[.y]]$study,
+             xlab   = "Summary proportions leaving out each study",
+             refline= pes[[.y]]$pred,
+             digits = 6)
+     )
+
+```
+
+
+## Forest plot -- 
+
+Once you are satisfied that there are no influential studies, fit the meta-analysis and make forest plots
+
+```{r forestplot, fig.height = 11, fig.width = 11}
+
+
+MA_random <- 
+  purrr::map(.x = dat_list, 
+       ~meta::metaprop(data        = .x, 
+                  event       = cases, 
+                  n           = sample_size,
+                  studlab     = study,  
+                  sm          = "PFT", 
+                  method.ci   = "CP", 
+                  level       = 0.95, 
+                  method.tau  = "DL", 
+                  pscale      = 100,
+                  digits.pval = 4, 
+                  prediction  = TRUE, 
+                  level.ma    = 0.95, 
+                  random      = TRUE, 
+                  fixed       = FALSE
+                  )
+             )
+
+
+# Make forestplot ----
+
+for (a in seq_along(MA_random)) {
+
+  # Get length of dataset
+  n_row <- nrow(dat_list[[a]])
+     
+  png(paste0(name_file[[a]], ".png"), 
+      units     = "in",
+      width     = 10, 
+      height    = ifelse(n_row <5, 5, 
+                         ifelse(n_row >= 5 & n_row <10, 6, 
+                                ifelse(n_row >= 10, 7, 6))), # Programmatically set page height
+      pointsize = 15,  
+      res       = 300, 
+      bg        = "white") 
+
+  
+  #Forest plot
+  meta::forest(MA_random[[a]],
+         xlim        = c(0, 100), 
+         pscale      = 100,
+         rightcols   = c("effect", "ci","w.random"),
+         rightlabs   = c("Prevalence",  "95% CI","    Weight(%)"),
+         leftcols    = c("studlab", "event", "n"), 
+         leftlabs    = c("Study", "          Cases", "  Sample"),
+         xlab        = "Prevalence (%)",
+         xlab.pos    = 50,
+         ff.xlab     = "bold", 
+         fs.axis     = 11,
+         sortvar     = study,
+         fs.lr       = 10,
+         fs.xlab     = 13,
+         fs.study    = 10.3,
+         fs.study.lables=10.3,
+         fs.heading=11,
+         fs.random = 10.3, 
+         fs.predict = 10.3,
+         fs.predict.labels = 10.3,
+         fs.hetstat=10,
+         squaresize = 0.45, 
+         col.square="gray", 
+         col.square.lines="gray",
+         col.diamond="black", 
+         col.diamond.lines="black",
+         comb.fixed=FALSE,
+         comb.random=FALSE,
+         lty.fixed=0,
+         lty.random=2, 
+         type.study="square",
+         type.random="diamond",
+         #ff.fixed="bold.italic",
+         ff.random="bold",
+         hetlab = "Heterogeneity:",
+         spacing = 1.3,
+         smlab="",
+         plotwidth = "6cm",
+         pooled.events = TRUE,
+         print.Q=FALSE,
+         print.tau2.ci = FALSE,
+         print.pval.Q=TRUE,
+         print.I2=TRUE,
+         print.tau2=TRUE,
+         prediction = TRUE,
+         col.by="grey",
+         digits.addcols.right = 1,
+         digits.I2 = 1, 
+         digits.pval.Q = 4, 
+         digits.weight = 1, 
+         digits.tau2 = 4,
+         digits = 1,
+         fixed = FALSE)
+
+
+dev.off()
+
+}
+
+
+```
+
+
+## Subgroup --
+
+Only do subgroup analysis if number of studies >= 10
+
+```{r forestplot, fig.height = 11, fig.width = 11}
+
+# Get data for subgroup analysis 
+subgroup_vars <- c("age_group", "year_group", "unsd_region")
+subgroup_name <- c("Age group", "Publication Year", "UNSD region")
+
+
+subgroup_data <- 
+  
+    purrr::keep(.x = dat_list, ~nrow(.x) >= 10) %>% 
+    purrr::map( 
+     ~dplyr::select(
+      # Select relevant variables for subgroup analysis --
+        .x, 
+        study, 
+        cases, 
+        sample_size,
+        all_of(subgroup_vars),
+        name
+        )
+     )
+
+
+# Run subgroup analysis ---
+result_subgroup <- list()
+
+for (df in seq_along(subgroup_data)) { # Loop through datasets for subgroup analysis
+
+  subgroup_temp <- list()
+  df_temp <- subgroup_data[[df]]
+
+    
+    # Loop over subgroup vars --
+    for (s in seq_along(subgroup_vars)) { # Loop through subgroup variables --
+    
+    sub_var_temp      <- subgroup_vars[s]
+    sub_var_lab_temp  <- subgroup_name[s]
+    
+    
+    subgrp_temp <- 
+      
+   meta::metaprop(data          = df_temp, 
+                  cases, 
+                  sample_size,
+                  studlab       = df_temp[["study"]],  
+                  sm            = "PFT", 
+                  method.ci     = "CP", 
+                  level         = 0.95, 
+                  method.tau    = "DL", 
+                  pscale        = 100,
+                  digits.pval   = 4, 
+                  prediction    = TRUE, 
+                  level.ma      = 0.95, 
+                  random        = TRUE, 
+                  fixed         = FALSE,
+                  subgroup      = df_temp[[sub_var_temp]], 
+                  subgroup.name = sub_var_lab_temp
+                  ) 
+   
+    subgroup_temp[[sub_var_temp]] <- 
+           update(
+            subgrp_temp, 
+            byvar = subgrp_temp$data[[".subgroup"]], 
+            subgroup.name = sub_var_lab_temp)
+    
+    # End of Loop for subgroup variables --
+    
+    }
+  
+  # Bind results of each subgroup --
+  
+  mbind <- meta::metabind(subgroup_temp[[1]], 
+                          subgroup_temp[[2]], 
+                          subgroup_temp[[3]]) # The index depends on the no. of subgroups --
+  
+  result_subgroup[[df]] <- mbind
+  
+}
+
+
+# Make summary forest plot for subgroup analysis --
+
+for (p in seq_along(result_subgroup)) { 
+
+  png(paste0(unique(subgroup_data[[p]]$name), ".png"), 
+             units     = "in", 
+             width     = 11, 
+             height    = 8, 
+             pointsize = 12,  
+             res       = 600)  
+
+  meta::forest(result_subgroup[[p]], 
+             spacing     = 1.3, 
+             plot.width  = "6cm",
+             xlab        = "\nPrevalence (%)",
+             xlab.pos    = 50,
+             xlim        = c(0, 100),
+             rightcols   = c("effect", "ci", "I2"), 
+             rightlabs   = c("Prevalence", "95% CI", "Het"),
+             leftlabs    = c("Studies (N)", "Interaction\np-value"),
+             smlab       = "Random effects",
+             colgap      = "4mm",
+             squaresize  = 0.5, 
+             col.by      = "dark blue", 
+             print.subgroup.labels = TRUE)
+      
+  dev.off()
+  
+                         
+    }
+
+
+```
+
+
+
+## Funnel plots and publication bias --
+
+```{r Funnel plots}
+
+## Get p-values for publication bias
+df_pub_bias <- keep(.x = MA_random, ~.x$k>=5) # Keep dataset with at least 5 rows
+
+
+# Extract p-values --
+bias_p <- 
+  map(
+    .x = df_pub_bias, 
+    ~metabias(.x, k.min = 5, method.bias = "linreg")) %>% map_dbl(~round(.x$pval, 4))
+
+
+# Make funnel plots --
+
+for (b in seq_along(df_pub_bias)) {
+
+png(paste0(unique(df_pub_bias[[b]]$data$name),".png"), 
+    units     = "in", 
+    width     = 10, 
+    height    = 7, 
+    res       = 600, 
+    pointsize = 12)
+
+    meta:::funnel.meta(df_pub_bias[[b]],
+                backtransf = TRUE,
+                col     = "navy blue",
+                back    = "white",
+                xlab    = "Freeman-Tukey double arcsine transformed proportion")
+    
+    text(x = 0.4, y = 0.01, label = paste0("p(Egger)=", bias_p[[p]]))
+
+dev.off()
+
+}
+ 
+
+```
+
