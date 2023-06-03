@@ -1,2 +1,2 @@
 # Meta-analysis of proportions with purrr
-Performing meta-analysis on multiple dataset using purrr
+Performing meta-analysis on multiple datasets using purrr
